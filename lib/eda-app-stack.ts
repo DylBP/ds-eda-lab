@@ -8,6 +8,9 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import { Duration } from "aws-cdk-lib";
+import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 
 import { Construct } from "constructs";
 // import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -22,11 +25,7 @@ export class EDAAppStack extends cdk.Stack {
       publicReadAccess: false,
     });
 
-    // Integration infrastructure
-
-  const imageProcessQueue = new sqs.Queue(this, "img-created-queue", {
-    receiveMessageWaitTime: cdk.Duration.seconds(10),
-  });
+  // Integration infrastructure
 
   const newImageTopic = new sns.Topic(this, "NewImageTopic", {
     displayName: "New Image topic",
@@ -34,6 +33,25 @@ export class EDAAppStack extends cdk.Stack {
 
   const mailerQ = new sqs.Queue(this, "mailer-queue", {
     receiveMessageWaitTime: cdk.Duration.seconds(10),
+  });
+
+  const badImageQueue = new sqs.Queue(this, "bad-image-queue", {
+    retentionPeriod: Duration.minutes(10),
+  })
+
+  const imageProcessQueue = new sqs.Queue(this, "img-created-queue", {
+    deadLetterQueue: {
+      queue: badImageQueue,
+      maxReceiveCount: 1,
+    },
+    receiveMessageWaitTime: cdk.Duration.seconds(10),
+  });
+
+  const imageTable = new dynamodb.Table(this, "imagesTable", {
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    partitionKey: { name: "filename", type: dynamodb.AttributeType.STRING },
+    removalPolicy: cdk.RemovalPolicy.DESTROY,
+    tableName: "imagesTable",
   });
 
   // Lambda functions
@@ -46,14 +64,25 @@ export class EDAAppStack extends cdk.Stack {
       entry: `${__dirname}/../lambdas/processImage.ts`,
       timeout: cdk.Duration.seconds(15),
       memorySize: 128,
+      environment: {
+        TABLE_NAME: imageTable.tableName
+      }
     }
   );
 
   const mailerFn = new lambdanode.NodejsFunction(this, "mailer-function", {
-    runtime: lambda.Runtime.NODEJS_16_X,
+    runtime: lambda.Runtime.NODEJS_18_X,
     memorySize: 1024,
     timeout: cdk.Duration.seconds(3),
     entry: `${__dirname}/../lambdas/mailer.ts`,
+  });
+
+  const failedImageFunction = new lambdanode.NodejsFunction(this, "failed-image-function", {
+    architecture: lambda.Architecture.ARM_64,
+    runtime: lambda.Runtime.NODEJS_18_X,
+    entry: `${__dirname}/../lambdas/handleBadImage.ts`,
+    timeout: Duration.seconds(10),
+    memorySize: 128,
   });
 
   // S3 --> SQS
@@ -74,6 +103,7 @@ export class EDAAppStack extends cdk.Stack {
   const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {
     batchSize: 5,
     maxBatchingWindow: cdk.Duration.seconds(5),
+    maxConcurrency: 2
   });
 
   const newImageMailEventSource = new events.SqsEventSource(mailerQ, {
@@ -81,12 +111,20 @@ export class EDAAppStack extends cdk.Stack {
     maxBatchingWindow: cdk.Duration.seconds(5),
   }); 
 
+  failedImageFunction.addEventSource(
+    new events.SqsEventSource(badImageQueue, {
+      maxBatchingWindow: Duration.seconds(5),
+      maxConcurrency: 2,
+    })
+  )
+
   processImageFn.addEventSource(newImageEventSource);
   mailerFn.addEventSource(newImageMailEventSource);
 
   // Permissions
 
   imagesBucket.grantRead(processImageFn);
+  imageTable.grantReadWriteData(processImageFn)
 
   mailerFn.addToRolePolicy(
     new iam.PolicyStatement({
