@@ -21,6 +21,10 @@ export const handler: DynamoDBStreamHandler = async (event: any) => {
   for (const record of event.Records) {
     const dynamodb = record.dynamodb
 
+    if (record.eventName == "REMOVE") {
+      return
+    }
+
     if (dynamodb?.Keys.filename) {
         // Object key may have spaces or unicode non-ASCII characters.
         const srcKey = dynamodb.Keys.filename.S
@@ -34,7 +38,6 @@ export const handler: DynamoDBStreamHandler = async (event: any) => {
           await client.send(new SendEmailCommand(params));
         } catch (error: unknown) {
           console.log("ERROR is: ", error);
-          // return;
         }
     }
   }
@@ -50,11 +53,7 @@ function sendEmailParams({ name, email, message }: ContactDetails) {
         Html: {
           Charset: "UTF-8",
           Data: getHtmlContent({ name, email, message }),
-        },
-        // Text: {.           // For demo purposes
-        //   Charset: "UTF-8",
-        //   Data: getTextContent({ name, email, message }),
-        // },
+        }
       },
       Subject: {
         Charset: "UTF-8",
@@ -78,16 +77,5 @@ function getHtmlContent({ name, email, message }: ContactDetails) {
         <p style="font-size:18px">${message}</p>
       </body>
     </html> 
-  `;
-}
-
- // For demo purposes - not used here.
-function getTextContent({ name, email, message }: ContactDetails) {
-  return `
-    Received an Email. 📬
-    Sent from:
-        👤 ${name}
-        ✉️ ${email}
-    ${message}
   `;
 }

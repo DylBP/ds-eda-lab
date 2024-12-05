@@ -53,41 +53,37 @@ export class EDAAppStack extends cdk.Stack {
     });
 
     // Lambda functions -----------------------------------------
-    const processImageFn = new lambdanode.NodejsFunction(this, "ProcessImageFn", {
+    const commonProperties = {
+      architecture: lambda.Architecture.ARM_64,
       runtime: lambda.Runtime.NODEJS_18_X,
-      entry: `${__dirname}/../lambdas/processImage.ts`,
-      timeout: cdk.Duration.seconds(15),
+      timeout: Duration.seconds(10),
       memorySize: 128,
+    }
+
+    const processImageFn = new lambdanode.NodejsFunction(this, "ProcessImageFn", {
+      ...commonProperties,
+      entry: `${__dirname}/../lambdas/processImage.ts`,
       environment: {
         TABLE_NAME: imageTable.tableName
       }
-    }
-    );
+    });
+
+    const updateTableFn = new lambdanode.NodejsFunction(this, "update-table-fn", {
+      ...commonProperties,
+      entry: `${__dirname}/../lambdas/updateTable.ts`,
+      environment: {
+        TABLE_NAME: imageTable.tableName
+      }
+    });
 
     const mailerFn = new lambdanode.NodejsFunction(this, "mailer-function", {
-      runtime: lambda.Runtime.NODEJS_18_X,
-      memorySize: 1024,
-      timeout: cdk.Duration.seconds(3),
+      ...commonProperties,
       entry: `${__dirname}/../lambdas/mailer.ts`,
     });
 
     const handleBadImage = new lambdanode.NodejsFunction(this, "handle-bad-image", {
-      architecture: lambda.Architecture.ARM_64,
-      runtime: lambda.Runtime.NODEJS_18_X,
+      ...commonProperties,
       entry: `${__dirname}/../lambdas/handleBadImage.ts`,
-      timeout: Duration.seconds(10),
-      memorySize: 128,
-    });
-
-    const updateTableFn = new lambdanode.NodejsFunction(this, "update-table-fn", {
-      architecture: lambda.Architecture.ARM_64,
-      runtime: lambda.Runtime.NODEJS_18_X,
-      entry: `${__dirname}/../lambdas/updateTable.ts`,
-      timeout: Duration.seconds(10),
-      memorySize: 128,
-      environment: {
-        TABLE_NAME: imageTable.tableName
-      }
     });
 
     // Event Source Mappings -----------------------------------------
@@ -123,22 +119,27 @@ export class EDAAppStack extends cdk.Stack {
         allowlist: ['Caption', 'Date', 'Photographer']
       })
     }
-    
-    newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue));
 
-    // newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue))
+    newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue, {
+      filterPolicyWithMessageBody: {
+        Records: sns.FilterOrPolicy.policy({
+          eventName: sns.FilterOrPolicy.filter(sns.SubscriptionFilter.stringFilter({
+            allowlist: ["ObjectCreated:Put", "ObjectRemoved:Delete"]
+          }))
+        })
+      }
+    }));
+    
     newImageTopic.addSubscription(new subs.LambdaSubscription(updateTableFn, { filterPolicy: filterPolicy }))
     mailerFn.addEventSource(new DynamoEventSource(imageTable, { startingPosition: StartingPosition.LATEST }))
-    imageTable.grantStreamRead(mailerFn)
-    
-    // newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue, { filterPolicy: filerPolicy }))
-    // newImageTopic.addSubscription(new subs.LambdaSubscription(mailerFn, { filterPolicy: filerPolicy }))
-    // newImageTopic.addSubscription(new subs.LambdaSubscription(updateTableFn, { filterPolicy: filerPolicy }))
+  
+
 
     // Permissions  -----------------------------------------
     imagesBucket.grantRead(processImageFn);
     imageTable.grantReadWriteData(processImageFn)
     imageTable.grantReadWriteData(updateTableFn)
+    imageTable.grantStreamRead(mailerFn)
 
     mailerFn.addToRolePolicy(
       new iam.PolicyStatement({
